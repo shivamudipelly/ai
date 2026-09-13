@@ -1,0 +1,104 @@
+# Financial AI Platform - Docker Compose Configuration
+# This orchestrates all 4 containers: Frontend, Backend, MongoDB, and Ollama
+
+services:
+  # MongoDB Database - Stores chat history and user context
+  mongodb:
+    image: mongo:7.0
+    container_name: financial-ai-mongodb
+    restart: unless-stopped
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - financial-ai-network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  # Ollama AI Engine - Runs local LLM (Llama 3 / Qwen 2.5)
+  ai-engine:
+    image: ollama/ollama:latest
+    container_name: financial-ai-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"  # Exposed for debugging/model management
+    networks:
+      - financial-ai-network
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    # Uncomment below if you have NVIDIA GPU for faster inference
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+  # FastAPI Backend - API routing, AI logic, data fetching
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: financial-ai-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"  # Exposed for API access and debugging
+    environment:
+      - MONGODB_URL=mongodb://mongodb:27017
+      - MONGODB_DB_NAME=financial_ai
+      - OLLAMA_HOST=http://ai-engine:11434
+      - OLLAMA_MODEL=llama3
+    depends_on:
+      mongodb:
+        condition: service_healthy
+      ai-engine:
+        condition: service_healthy
+    networks:
+      - financial-ai-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # React Frontend (Vite) - User interface
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: financial-ai-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"  # Exposed for browser access
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - financial-ai-network
+
+# Named volumes for persistent data
+volumes:
+  mongodb_data:
+    driver: local
+  ollama_data:
+    driver: local
+
+# Internal Docker network for container communication
+networks:
+  financial-ai-network:
+    driver: bridge
