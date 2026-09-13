@@ -1,5 +1,5 @@
 # Financial AI Platform - Docker Compose Configuration
-# This orchestrates all 4 containers: Frontend, Backend, MongoDB, and Ollama
+# Orchestrates all containers: Frontend, Backend, MongoDB, Ollama, and Ollama-Init
 
 services:
   # MongoDB Database - Stores chat history and user context
@@ -16,9 +16,9 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 20s
 
-  # Ollama AI Engine - Runs local LLM (Qwen 2.5 with reasoning capabilities)
+  # Ollama AI Engine - Runs local LLM
   ai-engine:
     image: ollama/ollama:latest
     container_name: financial-ai-ollama
@@ -26,28 +26,44 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     ports:
-      - "11434:11434"  # Exposed for debugging/model management
+      - "11434:11434"  # Exposed for model inspection and API access
     networks:
       - financial-ai-network
     environment:
       - OLLAMA_HOST=0.0.0.0
-    # Uncomment below if you have NVIDIA GPU for faster inference
-    # deploy:
-    #   resources:
-    #     reservations:
-    #       devices:
-    #         - driver: nvidia
-    #           count: all
-    #           capabilities: [gpu]
+    command: "serve"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 120s
-    command: "ollama serve"
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
 
-  # FastAPI Backend - API routing, AI logic, data fetching
+  # Ollama Model Provisioner - Automatically pulls the configured model on startup if not present
+  ollama-init:
+    image: ollama/ollama:latest
+    container_name: financial-ai-ollama-init
+    networks:
+      - financial-ai-network
+    environment:
+      - OLLAMA_HOST=ai-engine:11434
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Verifying connection to Ollama engine..."
+        until ollama list > /dev/null 2>&1; do
+          sleep 2
+        done
+        echo "Ensuring model $$OLLAMA_MODEL is downloaded..."
+        ollama pull $$OLLAMA_MODEL
+        echo "Model $$OLLAMA_MODEL ready!"
+    depends_on:
+      ai-engine:
+        condition: service_healthy
+    restart: "no"
+
+  # FastAPI Backend - API routing, AI agent, data fetching
   backend:
     build:
       context: ./backend
@@ -55,23 +71,25 @@ services:
     container_name: financial-ai-backend
     restart: unless-stopped
     ports:
-      - "8000:8000"  # Exposed for API access and debugging
+      - "8000:8000"  # Exposed for API access and Swagger docs
     environment:
-      - MONGODB_URL=mongodb://mongodb:27017
-      - MONGODB_DB_NAME=financial_ai
-      - OLLAMA_HOST=http://ai-engine:11434
-      - OLLAMA_MODEL=qwen2.5:14b
+      - MONGODB_URL=${MONGODB_URL:-mongodb://mongodb:27017}
+      - MONGODB_DB_NAME=${MONGODB_DB_NAME:-financial_ai}
+      - OLLAMA_HOST=${OLLAMA_HOST:-http://ai-engine:11434}
+      - OLLAMA_MODEL=${OLLAMA_MODEL:-qwen2.5:1.5b}
     depends_on:
       mongodb:
+        condition: service_healthy
+      ai-engine:
         condition: service_healthy
     networks:
       - financial-ai-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 30s
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/health')"]
+      interval: 20s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 30s
 
   # React Frontend (Vite) - User interface
   frontend:
@@ -81,9 +99,9 @@ services:
     container_name: financial-ai-frontend
     restart: unless-stopped
     ports:
-      - "3000:3000"  # Exposed for browser access
+      - "3000:3000"  # Exposed for web browser access
     environment:
-      - VITE_API_URL=http://localhost:8000/api
+      - VITE_API_URL=${VITE_API_URL:-http://localhost:8000/api}
     depends_on:
       backend:
         condition: service_healthy

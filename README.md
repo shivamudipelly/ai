@@ -1,202 +1,124 @@
-# Financial AI Platform - Phase 1 Setup Guide
+# 📈 Financial AI Platform - Docker Setup & User Guide
 
-## 📁 Project Structure
-
-```
-/workspace/
-├── docker-compose.yml          # Main orchestration file
-├── frontend/                   # React (Vite) + Tailwind
-│   ├── Dockerfile
-│   ├── package.json
-│   ├── vite.config.js
-│   ├── tailwind.config.js
-│   ├── postcss.config.js
-│   ├── index.html
-│   └── src/
-│       ├── main.jsx
-│       ├── App.jsx
-│       └── index.css
-└── backend/                    # Python FastAPI
-    ├── Dockerfile
-    ├── requirements.txt
-    └── app/
-        ├── main.py
-        ├── config.py
-        └── database.py
-```
-
-## 🚀 Quick Start
-
-### Step 1: Navigate to the project directory
-```bash
-cd /workspace
-```
-
-### Step 2: Build and start all containers
-```bash
-docker-compose up --build
-```
-
-**Note:** First-time startup will take 10-15 minutes as it:
-- Downloads MongoDB image (~500MB)
-- Downloads Ollama image (~200MB)
-- Downloads Qwen 2.5 14B model (~9GB) - **Reasoning-capable LLM**
-- Builds frontend and backend images
-
-### Step 3: Access the services
-
-Once all containers are healthy, access them at:
-
-| Service     | URL                          | Port  |
-|-------------|------------------------------|-------|
-| Frontend    | http://localhost:3000        | 3000  |
-| Backend API | http://localhost:8000        | 8000  |
-| MongoDB     | mongodb://localhost:27017    | 27017 |
-| Ollama      | http://localhost:11434       | 11434 |
-
-### Step 4: Verify everything is working
-
-#### Test Backend Health
-```bash
-curl http://localhost:8000/api/health
-```
-
-Expected response:
-```json
-{
-  "status": "healthy",
-  "service": "financial-ai-backend",
-  "version": "0.1.0"
-}
-```
-
-#### Test Frontend
-Open your browser and navigate to: http://localhost:3000
-
-You should see the Financial AI Platform interface with backend status showing "connected".
-
-#### Check Container Status
-```bash
-docker-compose ps
-```
-
-All 4 containers should show "healthy" status.
-
-#### View Logs
-```bash
-# All containers
-docker-compose logs -f
-
-# Specific container
-docker-compose logs -f backend
-docker-compose logs -f frontend
-docker-compose logs -f mongodb
-docker-compose logs -f ai-engine
-```
-
-## 🔧 Troubleshooting
-
-### Container won't start
-```bash
-# Rebuild specific service
-docker-compose up --build backend
-
-# Force recreate
-docker-compose up --force-recreate
-```
-
-### Check if ports are available
-```bash
-# Linux/Mac
-lsof -i :3000
-lsof -i :8000
-lsof -i :11434
-lsof -i :27017
-
-# Windows
-netstat -ano | findstr :3000
-netstat -ano | findstr :8000
-```
-
-### Reset everything
-```bash
-# Stop and remove all containers and volumes
-docker-compose down -v
-
-# Rebuild from scratch
-docker-compose up --build
-```
-
-## 📋 What's Included in Phase 1
-
-✅ **Docker Infrastructure**
-- [x] Frontend Dockerfile (Node.js 20 + Vite)
-- [x] Backend Dockerfile (Python 3.11 + FastAPI)
-- [x] docker-compose.yml with all 4 services
-- [x] Internal Docker network for container communication
-- [x] Health checks for all services
-- [x] Persistent volumes for MongoDB and Ollama data
-
-✅ **Frontend (React + Vite + Tailwind)**
-- [x] Basic React application structure
-- [x] Tailwind CSS configuration
-- [x] Vite dev server with proxy to backend
-- [x] Simple UI showing system status
-
-✅ **Backend (FastAPI)**
-- [x] FastAPI application with lifespan events
-- [x] MongoDB connection with Motor (async driver)
-- [x] Configuration management with Pydantic Settings
-- [x] Health check endpoint
-- [x] CORS middleware for Docker network
-
-✅ **Database (MongoDB)**
-- [x] MongoDB 7.0 container
-- [x] Persistent volume for data
-- [x] Health check configuration
-
-✅ **AI Engine (Ollama)**
-- [x] Ollama container ready for LLM deployment
-- [x] Persistent volume for models
-- [x] Port exposed for model management
-- [x] Optional GPU passthrough configuration (commented out)
-
-## 🎯 Next Steps
-
-Once Phase 1 is running successfully, we'll proceed to:
-
-**Phase 2**: Memory Layer (MongoDB schemas, chat history, context window)
-**Phase 3**: Real-Time Data Engine (yfinance, CoinGecko, IPO data tools)
-**Phase 4**: AI Agent & Reasoning Core (Ollama integration, ReAct pattern)
-**Phase 5**: Frontend UI (Full chat interface with streaming)
-**Phase 6**: Refinement & Optimization (Error handling, GPU acceleration)
-
-## ⚠️ Important Notes
-
-1. **First Run**: The Ollama container will automatically pull the **Qwen 2.5 14B** model on first run. This can take 15-25 minutes depending on your internet speed. This model has superior reasoning capabilities compared to Llama 3, making it ideal for financial analysis.
-
-2. **Why Qwen 2.5?** 
-   - **Enhanced Reasoning**: Better at logical deduction and multi-step problem solving
-   - **Financial Domain Knowledge**: Trained on extensive financial and technical data
-   - **Function Calling**: Superior at understanding when to call external tools (yfinance, CoinGecko)
-   - **14B Parameters**: Sweet spot between performance and resource usage (~9GB RAM)
-
-3. **GPU Acceleration**: If you have an NVIDIA GPU, uncomment the GPU section in `docker-compose.yml` under the `ai-engine` service for significantly faster inference (5-10x speedup).
-
-4. **Resource Usage**: 
-   - Ollama with Qwen 2.5 14B requires ~9-10GB RAM
-   - Total system memory usage: ~12-14GB
-   - Ensure you have at least 16GB RAM for smooth operation (32GB recommended)
-
-5. **Alternative Models**: If Qwen 2.5 14B is too large for your system, you can change to:
-   - `qwen2.5:7b` (5GB RAM) - Good balance
-   - `qwen2.5:3b` (2GB RAM) - Lightweight option
-   - `llama3.1:8b` (5GB RAM) - Meta's latest
-   
-   Simply update `OLLAMA_MODEL` in `docker-compose.yml` and `config.py`.
-
-6. **Stopping Services**: Use `docker-compose down` to stop all containers gracefully. The model will remain cached in the `ollama_data` volume for faster subsequent startups.
+A production-grade, containerized Financial AI Assistant powered by local LLMs (Qwen 2.5 via Ollama), real-time financial market tools (Yahoo Finance, CoinGecko, IPO GMP tracker, Mutual Funds), FastAPI, and React.
 
 ---
 
-**Ready to proceed?** Once you confirm Phase 1 is running successfully, we'll move to Phase 2!
+## 🏗️ Architecture
+
+```
+                                  ┌────────────────────────┐
+                                  │   React + Vite UI      │
+                                  │  http://localhost:3000 │
+                                  └───────────┬────────────┘
+                                              │
+                                              ▼ (API Proxy / SSE)
+┌───────────────────────┐         ┌────────────────────────┐
+│  Ollama LLM Engine    │ ◄─────► │   FastAPI Backend      │
+│  http://localhost:11434│         │  http://localhost:8000 │
+└───────────┬───────────┘         └───────────┬────────────┘
+            │                                 │
+     (Model Auto-pull)                        ▼
+┌───────────┴───────────┐         ┌────────────────────────┐
+│  ollama-init Service  │         │   MongoDB Database     │
+│  (One-time Provision) │         │   localhost:27017      │
+└───────────────────────┘         └────────────────────────┘
+```
+
+| Service | Container Name | Port | Description |
+|---|---|---|---|
+| **Frontend** | `financial-ai-frontend` | `3000` | Modern React + Tailwind chat interface |
+| **Backend** | `financial-ai-backend` | `8000` | FastAPI server, ReAct agent, financial tools |
+| **Ollama** | `financial-ai-ollama` | `11434` | Local LLM inference engine |
+| **Ollama Init** | `financial-ai-ollama-init` | - | Automatic model provisioner on startup |
+| **MongoDB** | `financial-ai-mongodb` | `27017` | Database storing conversations & messages |
+
+---
+
+## 🚀 One-Command Docker Quickstart
+
+### Windows (PowerShell)
+```powershell
+.\start.ps1
+```
+*(Or double-click `start.bat`)*
+
+### Linux / macOS
+```bash
+chmod +x start.sh
+./start.sh
+```
+
+### Standard Docker Compose
+```bash
+docker compose up --build -d
+```
+
+On first startup:
+1. Docker builds the Backend and Frontend images.
+2. MongoDB and Ollama start up with persistent named volumes.
+3. The `ollama-init` service automatically checks and downloads the configured LLM model (`qwen2.5:1.5b` by default).
+4. Once all services are healthy, open **http://localhost:3000** in your browser!
+
+---
+
+## ⚙️ Configuration (`.env`)
+
+You can customize the setup using the `.env` file (copied automatically from `.env.example`):
+
+```env
+# Ollama LLM Model Selection:
+# - qwen2.5:1.5b : Fastest, lightweight (~1GB RAM), ideal for CPU systems
+# - qwen2.5:7b   : High accuracy (~5GB RAM), recommended for 16GB RAM systems
+# - qwen2.5:14b  : Maximum reasoning (~10GB RAM), requires GPU or >16GB RAM
+OLLAMA_MODEL=qwen2.5:1.5b
+
+MONGODB_URL=mongodb://mongodb:27017
+MONGODB_DB_NAME=financial_ai
+OLLAMA_HOST=http://ai-engine:11434
+VITE_API_URL=http://localhost:8000/api
+```
+
+---
+
+## 🛠️ Useful Docker Commands
+
+### Check Service Status
+```bash
+docker compose ps
+```
+
+### View Live Logs
+```bash
+# All services
+docker compose logs -f
+
+# Backend only
+docker compose logs -f backend
+
+# Ollama model download progress
+docker compose logs -f ollama-init
+```
+
+### Pull or Switch LLM Models
+To use another model (e.g. `qwen2.5:7b`):
+1. Update `OLLAMA_MODEL=qwen2.5:7b` in `.env`.
+2. Restart backend:
+   ```bash
+   docker compose up -d
+   ```
+
+### Stop All Containers
+```bash
+docker compose down
+```
+*(Or run `.\stop.ps1` / `stop.bat`)*
+
+---
+
+## 🔍 Verification & Health Checks
+
+- **Backend Health:** `http://localhost:8000/api/health`
+- **Swagger Documentation:** `http://localhost:8000/docs`
+- **Frontend App:** `http://localhost:3000`
+- **Ollama Installed Models:** `docker exec financial-ai-ollama ollama list`

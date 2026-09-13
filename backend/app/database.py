@@ -5,6 +5,11 @@ from app.config import settings
 class Database:
     client: AsyncIOMotorClient = None
     db = None
+    in_memory: dict = {
+        "users": {},
+        "conversations": {},
+        "messages": []
+    }
 
 
 db = Database()

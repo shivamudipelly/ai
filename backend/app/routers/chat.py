@@ -1,5 +1,8 @@
 from fastapi import APIRouter, HTTPException, status
-from typing import List, Optional
+from fastapi.responses import StreamingResponse
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel
+import json
 
 from app.models import (
     MessageCreate, Message,
@@ -8,48 +11,40 @@ from app.models import (
     ChatHistoryResponse, ContextWindowConfig
 )
 from app.repositories import UserRepository, ConversationRepository, MessageRepository
-from app.database import db
+from app.agent import ai_agent
 
-router = APIRouter(prefix="/chat", tags=["Chat & Memory"])
+router = APIRouter(prefix="/chat", tags=["Chat & AI Agent"])
 
 
-def check_db_connection():
-    """Check if database is connected"""
-    if not db.db:
-        print("ERROR: Database connection not available - db.db is None")
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database connection not available. Please ensure MongoDB is running."
-        )
-    print(f"Database connection OK: {db.db.name}")
+class ChatMessageRequest(BaseModel):
+    conversation_id: str
+    message: str
+    user_id: Optional[str] = "default_user"
+    simple_mode: Optional[bool] = True
+
+
+class ChatResponse(BaseModel):
+    success: bool
+    response: str
+    thought_process: Optional[str] = None
+    tools_used: list = []
+    tool_results: list = []
+    iterations: int = 0
+    error: Optional[str] = None
 
 
 @router.post("/users", response_model=User, status_code=status.HTTP_201_CREATED)
 async def create_user(user_data: UserCreate):
-    """
-    Create a new user.
-    
-    This is the entry point for user management. Each user can have multiple conversations.
-    """
+    """Create a new user"""
     try:
-        check_db_connection()
-        
-        # Check if user with this email already exists
-        existing_user = await UserRepository.get_user_by_id(user_data.email)  # Using email as temp ID check
+        # Check if existing user by email
+        existing_user = await UserRepository.get_user_by_id(user_data.email)
         if existing_user:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User with this email already exists"
-            )
+            return existing_user
         
         user = await UserRepository.create_user(user_data)
         return user
-    except HTTPException:
-        raise
     except Exception as e:
-        print(f"Error creating user: {e}")
-        import traceback
-        traceback.print_exc()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to create user: {str(e)}"
@@ -70,61 +65,46 @@ async def get_user(user_id: str):
 
 @router.post("/conversations", response_model=Conversation, status_code=status.HTTP_201_CREATED)
 async def create_conversation(conversation_data: ConversationCreate):
-    """
-    Create a new conversation for a user.
-    
-    A conversation is a container for messages. Each conversation belongs to a user.
-    """
-    # Verify user exists
+    """Create a new conversation for a user"""
     user = await UserRepository.get_user_by_id(conversation_data.user_id)
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
+        # Auto-create fallback user if user_id was provided
+        user = await UserRepository.create_user(UserCreate(email=f"{conversation_data.user_id}@example.com", name="User"))
+        conversation_data.user_id = user.id
     
     conversation = await ConversationRepository.create_conversation(conversation_data)
     return conversation
 
 
-@router.get("/conversations/{conversation_id}", response_model=Conversation)
+@router.get("/conversations/{conversation_id}")
+@router.get("/conversation/{conversation_id}")
 async def get_conversation(conversation_id: str):
-    """Get conversation by ID"""
+    """Get conversation by ID along with its messages"""
     conversation = await ConversationRepository.get_conversation_by_id(conversation_id)
     if not conversation:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Conversation not found"
         )
-    return conversation
+    messages = await MessageRepository.get_messages_by_conversation(conversation_id)
+    return {
+        "success": True,
+        "conversation": conversation,
+        "messages": messages
+    }
 
 
 @router.get("/users/{user_id}/conversations", response_model=List[Conversation])
 async def get_user_conversations(user_id: str, limit: int = 20, skip: int = 0):
-    """
-    Get all conversations for a user.
-    
-    Returns conversations sorted by last updated time (most recent first).
-    """
-    # Verify user exists
-    user = await UserRepository.get_user_by_id(user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
+    """Get all conversations for a user"""
     conversations = await ConversationRepository.get_user_conversations(user_id, limit, skip)
     return conversations
 
 
 @router.delete("/conversations/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/conversation/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_conversation(conversation_id: str):
-    """
-    Delete a conversation and all its messages.
-    
-    This is a cascade delete - all messages in the conversation will also be deleted.
-    """
+    """Delete a conversation and all its messages"""
     success = await ConversationRepository.delete_conversation(conversation_id)
     if not success:
         raise HTTPException(
@@ -135,13 +115,7 @@ async def delete_conversation(conversation_id: str):
 
 @router.post("/messages", response_model=Message, status_code=status.HTTP_201_CREATED)
 async def create_message(message_data: MessageCreate):
-    """
-    Create a new message in a conversation.
-    
-    This is the primary endpoint for adding messages to the chat history.
-    Each message is associated with a conversation and has a role (user/assistant/system).
-    """
-    # Verify conversation exists
+    """Add a raw message to chat history"""
     conversation = await ConversationRepository.get_conversation_by_id(message_data.conversation_id)
     if not conversation:
         raise HTTPException(
@@ -153,56 +127,53 @@ async def create_message(message_data: MessageCreate):
     return message
 
 
+@router.post("/message", response_model=ChatResponse)
+async def send_ai_message(request: ChatMessageRequest):
+    """Send a message to the AI agent and receive ReAct reasoning response"""
+    try:
+        result = await ai_agent.process_message(
+            user_message=request.message,
+            conversation_id=request.conversation_id,
+            user_id=request.user_id or "default_user"
+        )
+        return ChatResponse(**result)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error processing message: {str(e)}")
+
+
+@router.post("/stream")
+async def stream_ai_message(request: ChatMessageRequest):
+    """Stream AI response token by token via Server-Sent Events (SSE)"""
+    async def generate():
+        try:
+            async for chunk in ai_agent.stream_response(
+                user_message=request.message,
+                conversation_id=request.conversation_id,
+                user_id=request.user_id or "default_user"
+            ):
+                yield f"data: {json.dumps(chunk)}\n\n"
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'content': str(e), 'done': True, 'error': str(e)})}\n\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
 @router.get("/conversations/{conversation_id}/messages", response_model=List[Message])
 async def get_messages(conversation_id: str, limit: int = 100, skip: int = 0):
-    """
-    Get all messages in a conversation.
-    
-    Returns messages in chronological order (oldest first).
-    """
-    # Verify conversation exists
-    conversation = await ConversationRepository.get_conversation_by_id(conversation_id)
-    if not conversation:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Conversation not found"
-        )
-    
+    """Get all messages in a conversation"""
     messages = await MessageRepository.get_messages_by_conversation(conversation_id, limit, skip)
     return messages
 
 
 @router.get("/conversations/{conversation_id}/history", response_model=ChatHistoryResponse)
 async def get_chat_history(conversation_id: str, max_context_messages: int = 10):
-    """
-    Get complete chat history with context window for AI processing.
-    
-    This is the CRITICAL endpoint for the AI engine. It returns:
-    - The conversation metadata
-    - All messages in the conversation
-    - A context window (last N messages) formatted for AI consumption
-    
-    The context window includes:
-    - Recent messages (configurable via max_context_messages)
-    - System prompt (if enabled) to guide AI behavior
-    
-    This enables the AI to maintain conversation memory and provide contextual responses.
-    """
-    # Verify conversation exists
-    conversation = await ConversationRepository.get_conversation_by_id(conversation_id)
-    if not conversation:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Conversation not found"
-        )
-    
+    """Get complete chat history with context window"""
     chat_history = await MessageRepository.get_chat_history(conversation_id, max_context_messages)
     if not chat_history:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Failed to retrieve chat history"
         )
-    
     return chat_history
 
 
@@ -212,27 +183,10 @@ async def get_context_window(
     max_messages: int = 10,
     include_system_prompt: bool = True
 ):
-    """
-    Get only the context window (last N messages) for AI processing.
-    
-    This is a lightweight version of the history endpoint, returning only
-    the messages needed for AI context (not the full history).
-    
-    Use this when you need to minimize data transfer and only require
-    the recent conversation context.
-    """
-    # Verify conversation exists
-    conversation = await ConversationRepository.get_conversation_by_id(conversation_id)
-    if not conversation:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Conversation not found"
-        )
-    
+    """Get AI context window (last N messages)"""
     config = ContextWindowConfig(
         max_messages=max_messages,
         include_system_prompt=include_system_prompt
     )
-    
     context_window = await MessageRepository.get_context_window(conversation_id, config)
     return context_window

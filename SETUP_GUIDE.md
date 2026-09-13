@@ -60,15 +60,14 @@ Your production-grade, Dockerized Financial AI Platform is ready with:
 
 ### Step 1: Start All Containers
 
-```bash
-cd /workspace
-docker compose up --build
+Run via PowerShell:
+```powershell
+.\start.ps1
 ```
-
-**First-time setup will take 5-10 minutes:**
-- Download Docker images (~500MB)
-- Pull Qwen 2.5 14B model (~9GB)
-- Install dependencies
+Or via Docker Compose:
+```bash
+docker compose up --build -d
+```
 
 ### Step 2: Verify Everything is Running
 

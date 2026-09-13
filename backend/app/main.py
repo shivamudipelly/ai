@@ -5,7 +5,6 @@ from contextlib import asynccontextmanager
 from app.config import settings
 from app.database import connect_to_database, close_database_connection
 from app.routers import chat
-from app.routers import chat_ai
 
 
 @asynccontextmanager
@@ -34,7 +33,6 @@ app.add_middleware(
 
 # Include routers
 app.include_router(chat.router, prefix=settings.api_prefix)
-app.include_router(chat_ai.router, prefix=settings.api_prefix)
 
 
 @app.get(f"{settings.api_prefix}/health")
