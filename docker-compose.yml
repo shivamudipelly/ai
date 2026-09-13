@@ -64,8 +64,6 @@ services:
     depends_on:
       mongodb:
         condition: service_healthy
-      ai-engine:
-        condition: service_healthy
     networks:
       - financial-ai-network
     healthcheck:
@@ -73,7 +71,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 40s
+      start_period: 60s
 
   # React Frontend (Vite) - User interface
   frontend:

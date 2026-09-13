@@ -16,10 +16,12 @@ router = APIRouter(prefix="/chat", tags=["Chat & Memory"])
 def check_db_connection():
     """Check if database is connected"""
     if not db.db:
+        print("ERROR: Database connection not available - db.db is None")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database connection not available. Please ensure MongoDB is running."
         )
+    print(f"Database connection OK: {db.db.name}")
 
 
 @router.post("/users", response_model=User, status_code=status.HTTP_201_CREATED)
@@ -29,18 +31,29 @@ async def create_user(user_data: UserCreate):
     
     This is the entry point for user management. Each user can have multiple conversations.
     """
-    check_db_connection()
-    
-    # Check if user with this email already exists
-    existing_user = await UserRepository.get_user_by_id(user_data.email)  # Using email as temp ID check
-    if existing_user:
+    try:
+        check_db_connection()
+        
+        # Check if user with this email already exists
+        existing_user = await UserRepository.get_user_by_id(user_data.email)  # Using email as temp ID check
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User with this email already exists"
+            )
+        
+        user = await UserRepository.create_user(user_data)
+        return user
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error creating user: {e}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="User with this email already exists"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create user: {str(e)}"
         )
-    
-    user = await UserRepository.create_user(user_data)
-    return user
 
 
 @router.get("/users/{user_id}", response_model=User)
