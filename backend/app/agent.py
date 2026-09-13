@@ -1,66 +1,61 @@
-"""
-AI Agent & Reasoning Core
-Implements ReAct (Reason + Act) pattern with function calling for financial analysis.
-Uses local Ollama with Qwen 2.5 model for enhanced reasoning capabilities.
-"""
-
-import httpx
+import asyncio
 import json
 import logging
+import re
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Tuple, Union
+from zoneinfo import ZoneInfo
+from typing import Dict, Any, List, Optional, Union
+
+import httpx
 
 from app.config import settings
-from app.tools import FINANCIAL_TOOLS, TOOL_DESCRIPTIONS
-from app.repositories import MessageRepository, ConversationRepository
+from app.tools import FINANCIAL_TOOLS
+from app.repositories import MessageRepository
 from app.models import Message
 
 logger = logging.getLogger(__name__)
+IST = ZoneInfo("Asia/Kolkata")
 
-# System prompt for financial analyst persona (date injected at runtime)
-SYSTEM_PROMPT = """You are a professional Financial Analyst AI assistant with access to real-time market data tools.
+STOCK_ALIASES = {
+    "tcs": "TCS.NS", "tata consultancy services": "TCS.NS",
+    "reliance": "RELIANCE.NS", "reliance industries": "RELIANCE.NS",
+    "infosys": "INFY.NS", "infy": "INFY.NS",
+    "hdfc bank": "HDFCBANK.NS", "hdfcbank": "HDFCBANK.NS",
+    "icici bank": "ICICIBANK.NS", "icicibank": "ICICIBANK.NS",
+    "sbi": "SBIN.NS", "state bank of india": "SBIN.NS",
+    "itc": "ITC.NS", "wipro": "WIPRO.NS",
+    "bharti airtel": "BHARTIARTL.NS", "airtel": "BHARTIARTL.NS",
+    "adani enterprises": "ADANIENT.NS", "adani ports": "ADANIPORTS.NS",
+}
+STOCK_TERMS = ("stock", "share", "equity", "nse", "bse", "price", "quote", "market cap", "p/e", "pe ratio", "52 week", "52-week", "dividend", "fundamental", "fundamentals", "technical analysis", "analyze", "analyse", "buy", "sell")
+CRYPTO_TERMS = ("crypto", "bitcoin", "ethereum", "btc", "eth")
+MF_TERMS = ("mutual fund", "mf nav", "nav", "sip", "scheme", "fund code")
+IPO_TERMS = ("ipo", "gmp", "grey market", "grey-market", "issue price", "listing date")
 
-TODAY'S DATE: {today_date}
 
-CRITICAL RULES — NEVER BREAK THESE:
-1. TODAY IS {today_date}. Never say any other date. Never say it is 2023 or 2024.
-2. NEVER fabricate, guess, or hallucinate any prices, numbers, percentages, or market data.
-3. If a tool returns an error or no data, say honestly: "I could not fetch live data for [X] right now."
-4. ALWAYS call the appropriate tool FIRST before stating any price or financial figure.
-5. For Indian stocks (NSE/BSE), use the ticker with .NS suffix (e.g. TCS.NS, RELIANCE.NS). Always show prices in INR.
-6. For Indian stocks, NEVER show prices in USD unless the tool explicitly returns USD.
-7. Keep your FINAL_ANSWER concise — maximum 4-5 sentences. Do NOT repeat sentences.
-8. Never repeat the same sentence or phrase more than once in a response.
+def now_ist() -> datetime:
+    return datetime.now(IST)
 
-AVAILABLE TOOLS:
-{tool_descriptions}
 
-RESPONSE FORMAT:
-When you need data, respond in this format:
-THOUGHT: [What data you need and which tool to use]
-ACTION: [exact_tool_name]
-ACTION_INPUT: {{"param1": "value1"}}
-
-After receiving tool results:
-THOUGHT: [Brief analysis of the data]
-FINAL_ANSWER: [Concise response with the real data from the tool. Maximum 4-5 sentences. No repetition.]
-
-If no tool needed:
-FINAL_ANSWER: [Your response]
-
-IMPORTANT: Your FINAL_ANSWER must be SHORT and NOT repeat any sentences. Stop after 4-5 sentences."""
+def clean_model_answer(text: str) -> str:
+    if not text:
+        return ""
+    text = re.sub(r"(?is)\bTHOUGHT\s*:.*?(?=\b(?:FINAL_ANSWER|ANSWER)\s*:|$)", "", text)
+    text = re.sub(r"(?im)^\s*(ACTION|ACTION_INPUT|OBSERVATION|FINAL_ANSWER|ANSWER)\s*:\s*", "", text)
+    return text.strip()
 
 
 class AIAgent:
+    """Financial assistant orchestration layer.
+
+    External financial data is selected and executed by backend code. Ollama
+    receives validated data and is used for explanation, not as a source of
+    live financial facts.
     """
-    AI Agent implementing ReAct pattern for financial analysis.
-    Manages conversation context, tool calling, and response generation.
-    """
-    
+
     def __init__(self):
-        self.max_iterations = 5  # Prevent infinite loops
-        self.context_window_size = getattr(settings, 'max_context_messages', 10)
-    
+        self.context_window_size = getattr(settings, "max_context_messages", 10)
+
     @property
     def ollama_url(self) -> str:
         return f"{settings.ollama_host.rstrip('/')}/api/generate"
@@ -68,311 +63,150 @@ class AIAgent:
     @property
     def model_name(self) -> str:
         return settings.ollama_model
-    
-    async def _call_ollama(self, prompt: str, stream: bool = False):
-        """Send prompt to Ollama and get response."""
-        try:
-            payload = {
-                "model": self.model_name,
-                "prompt": prompt,
-                "stream": stream,
-                "options": {
-                    "temperature": 0.1,
-                    "top_p": 0.9,
-                    "num_predict": 512,
-                    "stop": ["USER:", "HUMAN:", "\n\nUSER", "\n\nHUMAN"]
-                }
-            }
-            
-            timeout = httpx.Timeout(getattr(settings, 'ollama_timeout', 120.0), connect=10.0)
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                if stream:
-                    async with client.stream("POST", self.ollama_url, json=payload) as response:
-                        async for line in response.aiter_lines():
-                            if line:
-                                yield line
-                else:
-                    response = await client.post(self.ollama_url, json=payload)
-                    response.raise_for_status()
-                    result = response.json()
-                    yield result.get('response', '')
-                    
-        except Exception as e:
-            logger.error(f"Error calling Ollama at {self.ollama_url}: {str(e)}")
-            raise
-    
-    def _format_context(self, chat_history: List[Union[Message, Dict[str, Any]]]) -> str:
-        """Format chat history into context string for the AI."""
-        if not chat_history:
-            return ""
-        
-        context_parts = []
-        for msg in chat_history[-self.context_window_size:]:
+
+    def _today_text(self) -> str:
+        return now_ist().strftime("%A, %d %B %Y")
+
+    async def _ollama(self, prompt: str) -> str:
+        payload = {"model": self.model_name, "prompt": prompt, "stream": False,
+                   "options": {"temperature": 0.1, "top_p": 0.9, "num_predict": 384,
+                                "stop": ["USER:", "\nUSER:"]}}
+        timeout = httpx.Timeout(getattr(settings, "ollama_timeout", 120.0), connect=10.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.post(self.ollama_url, json=payload)
+            response.raise_for_status()
+            return response.json().get("response", "").strip()
+
+    def _format_context(self, history: List[Union[Message, Dict[str, Any]]]) -> str:
+        parts = []
+        for msg in history[-self.context_window_size:]:
             if isinstance(msg, Message):
-                role = "User" if msg.role == "user" else "Assistant"
-                content = msg.content
+                role, content = msg.role, msg.content
             else:
-                role = "User" if msg.get("role") == "user" else "Assistant"
-                content = msg.get("content", "")
-            context_parts.append(f"{role}: {content}")
-        
-        return "\n".join(context_parts)
-    
-    def _parse_ai_response(self, response: str) -> Tuple[Optional[str], Optional[Dict[str, Any]], Optional[str]]:
-        """
-        Parse AI response to extract thought, action, and final answer.
-        
-        Returns:
-            Tuple of (thought, action_input_dict, final_answer)
-        """
-        thought = None
-        action = None
-        action_input = None
-        final_answer = None
-        
-        lines = response.strip().split('\n')
-        
-        for i, line in enumerate(lines):
-            line_str = line.strip()
-            if line_str.startswith('THOUGHT:'):
-                thought = line_str.replace('THOUGHT:', '').strip()
-            elif line_str.startswith('ACTION:'):
-                action = line_str.replace('ACTION:', '').strip()
-            elif line_str.startswith('ACTION_INPUT:'):
-                try:
-                    action_input_str = line_str.replace('ACTION_INPUT:', '').strip()
-                    action_input = json.loads(action_input_str)
-                except json.JSONDecodeError:
-                    logger.error(f"Failed to parse ACTION_INPUT: {line_str}")
-            elif line_str.startswith('FINAL_ANSWER:'):
-                final_answer = line_str.replace('FINAL_ANSWER:', '').strip()
-                if i + 1 < len(lines):
-                    final_answer += '\n' + '\n'.join(lines[i+1:])
-                break
-        
-        return thought, {action: action_input} if (action and action_input is not None) else None, final_answer
-    
+                role, content = msg.get("role", "assistant"), msg.get("content", "")
+            parts.append(f"{'User' if role == 'user' else 'Assistant'}: {content}")
+        return "\n".join(parts)
+
+    def _classify(self, text: str) -> str:
+        q = text.lower()
+        if any(term in q for term in IPO_TERMS): return "ipo"
+        if any(term in q for term in MF_TERMS): return "mutual_fund"
+        if any(term in q for term in CRYPTO_TERMS): return "crypto"
+        if re.search(r"\b[A-Z]{2,15}\.(?:NS|BO)\b", text, re.I): return "stock"
+        if any(name in q for name in STOCK_ALIASES): return "stock"
+        if any(term in q for term in STOCK_TERMS): return "stock"
+        return "general"
+
+    def _resolve_stock(self, text: str) -> Optional[str]:
+        q = text.lower()
+        match = re.search(r"\b([A-Za-z][A-Za-z0-9&-]{0,14}\.(?:NS|BO))\b", text, re.I)
+        if match: return match.group(1).upper()
+        for alias in sorted(STOCK_ALIASES, key=len, reverse=True):
+            if alias in q: return STOCK_ALIASES[alias]
+        return None
+
     async def execute_tool(self, tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
-        """Execute a financial data tool."""
-        logger.info(f"Executing tool: {tool_name} with input: {tool_input}")
-        
         if tool_name not in FINANCIAL_TOOLS:
-            return {"error": f"Unknown tool: {tool_name}"}
-        
-        tool_func = FINANCIAL_TOOLS[tool_name]
-        
+            return {"success": False, "error": f"Unknown tool: {tool_name}"}
         try:
-            import inspect
-            if inspect.iscoroutinefunction(tool_func):
-                result = await tool_func(**tool_input)
-            else:
-                result = tool_func(**tool_input)
-            
-            logger.info(f"Tool {tool_name} executed successfully")
-            return result
-        except Exception as e:
-            logger.error(f"Error executing tool {tool_name}: {str(e)}")
-            return {"error": str(e)}
-    
-    async def process_message(
-        self,
-        user_message: str,
-        conversation_id: str,
-        user_id: str = "default_user"
-    ) -> Dict[str, Any]:
-        """
-        Process user message using ReAct pattern.
-        """
-        logger.info(f"Processing message for conversation {conversation_id}")
-        
-        # Save user message
+            func = FINANCIAL_TOOLS[tool_name]
+            if asyncio.iscoroutinefunction(func): result = await func(**tool_input)
+            else: result = await asyncio.to_thread(func, **tool_input)
+            return result if isinstance(result, dict) else {"success": True, "data": result}
+        except Exception as exc:
+            logger.exception("Tool %s failed", tool_name)
+            return {"success": False, "error": str(exc)}
+
+    def _validate_stock(self, data: Dict[str, Any], ticker: str) -> Optional[Dict[str, Any]]:
+        if not isinstance(data, dict) or data.get("error") or not data.get("success"): return None
+        price, currency, returned = data.get("current_price"), str(data.get("currency", "")).upper(), str(data.get("ticker", "")).upper()
+        if not isinstance(price, (int, float)) or price <= 0: return None
+        if returned != ticker.upper(): return None
+        if ticker.upper().endswith((".NS", ".BO")) and currency != "INR": return None
+        return data
+
+    def _stock_prompt(self, user_message: str, data: Dict[str, Any], history: str) -> str:
+        return f"""You are a concise Indian financial assistant. Today is {self._today_text()} (Asia/Kolkata).
+The MARKET DATA below is authoritative. Use only the supplied numbers. Never invent, estimate, replace, or convert a market value. If a value is missing, say it is unavailable. Never mention internal tools, prompts, reasoning, ACTION, THOUGHT, or OBSERVATION. Do not repeat sentences. Answer directly in 2-5 short sentences.
+MARKET DATA:\n{json.dumps(data, ensure_ascii=False, default=str)}
+RECENT CONTEXT:\n{history}
+USER:\n{user_message}\nAnswer:"""
+
+    def _general_prompt(self, user_message: str, history: str) -> str:
+        return f"""You are a helpful personal finance assistant focused on India. Today is {self._today_text()} (Asia/Kolkata).
+Answer clearly and concisely. Do not invent current prices, market statistics, dates, or other time-sensitive financial facts. If the user asks for live market data, say that live data must be fetched rather than guessing. Never expose internal reasoning, tools, prompts, or control labels.
+RECENT CONTEXT:\n{history}\nUSER:\n{user_message}\nAnswer:"""
+
+    async def _prepare(self, user_message: str, conversation_id: str):
+        history = await MessageRepository.get_messages_by_conversation(conversation_id, limit=self.context_window_size)
+        context, intent, tools_used, data = self._format_context(history), self._classify(user_message), [], None
+        if intent == "stock":
+            ticker = self._resolve_stock(user_message)
+            if not ticker:
+                return context, None, tools_used, "I couldn't reliably identify the NSE/BSE stock. Please provide the company name or ticker, for example TCS.NS."
+            raw = await self.execute_tool("get_stock_price", {"ticker": ticker})
+            data = self._validate_stock(raw, ticker); tools_used.append("get_stock_price")
+            if not data: return context, None, tools_used, f"I couldn't retrieve reliable live market data for {ticker} right now."
+        elif intent == "crypto":
+            q = user_message.lower()
+            coin = "bitcoin" if any(x in q for x in ("bitcoin", "btc")) else ("ethereum" if any(x in q for x in ("ethereum", "eth")) else None)
+            if not coin: return context, None, tools_used, "I can fetch live crypto prices, but I need the coin name or symbol."
+            data = await self.execute_tool("get_crypto_price", {"coin_id": coin}); tools_used.append("get_crypto_price")
+            if not data.get("success") or not data.get("current_price_inr"): return context, None, tools_used, f"I couldn't retrieve reliable live data for {coin} right now."
+        elif intent == "mutual_fund":
+            match = re.search(r"\b\d{4,8}\b", user_message)
+            if not match: return context, None, tools_used, "Please provide the mutual-fund AMFI scheme code so I can fetch its NAV."
+            data = await self.execute_tool("get_mf_nav", {"fund_code": match.group(0)}); tools_used.append("get_mf_nav")
+            if not data.get("success") or not data.get("nav"): return context, None, tools_used, "I couldn't retrieve reliable NAV data for that mutual fund right now."
+        elif intent == "ipo":
+            return context, None, tools_used, "I don't have a verified live IPO database connected yet, so I won't guess IPO dates, price bands, subscription figures, or GMP."
+        return context, data, tools_used, None
+
+    async def _answer_from_data(self, user_message: str, data: Dict[str, Any], context: str) -> str:
+        if "current_price" in data:
+            prompt = self._stock_prompt(user_message, data, context)
+        elif "current_price_inr" in data:
+            prompt = f"""You are a concise Indian financial assistant. Use ONLY this verified crypto data. Do not invent or change numbers. Never expose internal reasoning or tool names. Answer in 2-4 short sentences.\nVERIFIED DATA:\n{json.dumps(data, ensure_ascii=False, default=str)}\nUSER:\n{user_message}\nAnswer:"""
+        else:
+            prompt = f"""You are a concise Indian mutual-fund assistant. Use ONLY this verified NAV data. Do not invent or change numbers. Never expose internal reasoning or tool names. Answer in 2-4 short sentences.\nVERIFIED DATA:\n{json.dumps(data, ensure_ascii=False, default=str)}\nUSER:\n{user_message}\nAnswer:"""
+        return clean_model_answer(await self._ollama(prompt))
+
+    async def process_message(self, user_message: str, conversation_id: str, user_id: str = "default_user") -> Dict[str, Any]:
         await MessageRepository.add_message(conversation_id, user_id, "user", user_message)
-        
-        # Get chat history for context
-        chat_history = await MessageRepository.get_messages_by_conversation(conversation_id, limit=self.context_window_size)
-        
-        # Format context
-        context = self._format_context(chat_history)
-        
-        # Prepare initial prompt with today's real date
-        tool_descriptions = "\n".join([f"- {name}: {desc}" for name, desc in TOOL_DESCRIPTIONS.items()])
-        today_date = datetime.now().strftime("%A, %d %B %Y")  # e.g. "Saturday, 13 September 2026"
-        system_prompt = SYSTEM_PROMPT.format(tool_descriptions=tool_descriptions, today_date=today_date)
-        
-        initial_prompt = f"""{system_prompt}
-
-CURRENT CONVERSATION CONTEXT:
-{context}
-
-USER: {user_message}
-
-Begin your reasoning:"""
-        
-        # ReAct loop
-        iteration = 0
-        current_prompt = initial_prompt
-        tool_results = []
-        
-        while iteration < self.max_iterations:
-            iteration += 1
-            logger.info(f"ReAct iteration {iteration}")
-            
-            # Get AI response
-            try:
-                ai_response_gen = self._call_ollama(current_prompt)
-                ai_response = ""
-                async for chunk in ai_response_gen:
-                    ai_response += chunk
-            except Exception as e:
-                logger.error(f"Failed to communicate with AI engine: {e}")
-                fallback_msg = "Unable to connect to AI engine. Please ensure Ollama is running."
-                await MessageRepository.add_message(conversation_id, user_id, "assistant", fallback_msg)
-                return {
-                    "success": False,
-                    "response": fallback_msg,
-                    "error": str(e),
-                    "tools_used": [],
-                    "tool_results": [],
-                    "iterations": iteration
-                }
-
-            logger.debug(f"AI Response: {ai_response}")
-            
-            # Parse response
-            thought, action_dict, final_answer = self._parse_ai_response(ai_response)
-            
-            if final_answer:
-                logger.info("Final answer received")
-                await MessageRepository.add_message(conversation_id, user_id, "assistant", final_answer)
-                return {
-                    "success": True,
-                    "response": final_answer,
-                    "thought_process": thought,
-                    "tools_used": [tool_name for tool_name in action_dict.keys()] if action_dict else [],
-                    "tool_results": tool_results,
-                    "iterations": iteration
-                }
-            
-            if action_dict:
-                tool_name = list(action_dict.keys())[0]
-                tool_input = action_dict[tool_name]
-                
-                tool_result = await self.execute_tool(tool_name, tool_input or {})
-                tool_results.append({
-                    "tool": tool_name,
-                    "input": tool_input,
-                    "result": tool_result
-                })
-                
-                current_prompt += f"\n\n{ai_response}\nOBSERVATION: {json.dumps(tool_result, indent=2)}\nContinue your reasoning:"
-            else:
-                logger.warning("No action or final answer parsed, using raw response")
-                final_answer = ai_response.strip() or "Analysis complete."
-                await MessageRepository.add_message(conversation_id, user_id, "assistant", final_answer)
-                return {
-                    "success": True,
-                    "response": final_answer,
-                    "thought_process": thought,
-                    "tools_used": [],
-                    "tool_results": [],
-                    "iterations": iteration
-                }
-        
-        logger.warning("Max iterations reached without final answer")
-        fallback_response = "I apologize, but I'm having trouble completing this multi-step reasoning task. Please try rephrasing your question."
-        await MessageRepository.add_message(conversation_id, user_id, "assistant", fallback_response)
-        
-        return {
-            "success": False,
-            "response": fallback_response,
-            "error": "Max iterations reached",
-            "tools_used": [tr["tool"] for tr in tool_results],
-            "tool_results": tool_results,
-            "iterations": iteration
-        }
-    
-    async def stream_response(
-        self,
-        user_message: str,
-        conversation_id: str,
-        user_id: str = "default_user"
-    ):
-        """
-        Stream AI response token by token.
-        
-        Yields:
-            Dictionary chunks with response tokens in expected SSE format:
-            {"type": "content", "content": token, "token": token, "done": False}
-        """
-        logger.info(f"Streaming response for conversation {conversation_id}")
-        
-        # Save user message first
-        await MessageRepository.add_message(conversation_id, user_id, "user", user_message)
-        
-        # Get chat history
-        chat_history = await MessageRepository.get_messages_by_conversation(conversation_id, limit=self.context_window_size)
-        context = self._format_context(chat_history)
-        
-        tool_descriptions = "\n".join([f"- {name}: {desc}" for name, desc in TOOL_DESCRIPTIONS.items()])
-        today_date = datetime.now().strftime("%A, %d %B %Y")
-        system_prompt = SYSTEM_PROMPT.format(tool_descriptions=tool_descriptions, today_date=today_date)
-        
-        prompt = f"""{system_prompt}
-
-CURRENT CONVERSATION CONTEXT:
-{context}
-
-USER: {user_message}
-
-Provide your analysis (be concise, max 4-5 sentences, no repetition):"""
-        
-        full_response = ""
-        
+        tools_used, data = [], None
         try:
-            async for chunk in self._call_ollama(prompt, stream=True):
-                if chunk:
-                    try:
-                        data = json.loads(chunk)
-                        token = data.get('response', '')
-                        if token:
-                            full_response += token
-                            yield {
-                                "type": "content",
-                                "content": token,
-                                "token": token,
-                                "done": False
-                            }
-                        
-                        if data.get('done', False):
-                            # Clean up final response text if needed
-                            clean_response = full_response
-                            if "FINAL_ANSWER:" in clean_response:
-                                clean_response = clean_response.split("FINAL_ANSWER:", 1)[-1].strip()
-                            
-                            await MessageRepository.add_message(conversation_id, user_id, "assistant", clean_response or full_response)
-                            yield {
-                                "type": "done",
-                                "content": "",
-                                "token": "",
-                                "done": True,
-                                "full_response": clean_response or full_response
-                            }
-                            break
-                    except json.JSONDecodeError:
-                        continue
-                        
-        except Exception as e:
-            logger.error(f"Error streaming response: {str(e)}")
-            error_msg = "Sorry, I encountered an error while generating the response."
+            context, data, tools_used, immediate = await self._prepare(user_message, conversation_id)
+            if immediate: answer = immediate
+            elif data: answer = await self._answer_from_data(user_message, data, context)
+            else: answer = clean_model_answer(await self._ollama(self._general_prompt(user_message, context)))
+            answer = answer or "I couldn't generate a response right now."
+            await MessageRepository.add_message(conversation_id, user_id, "assistant", answer)
+            return {"success": True, "response": answer, "tools_used": tools_used, "tool_results": [data] if data else [], "iterations": 1}
+        except Exception as exc:
+            logger.exception("Agent request failed")
+            answer = "I couldn't complete that request right now. Please try again."
+            await MessageRepository.add_message(conversation_id, user_id, "assistant", answer)
+            return {"success": False, "response": answer, "error": str(exc), "tools_used": tools_used, "tool_results": [data] if data else [], "iterations": 1}
+
+    async def stream_response(self, user_message: str, conversation_id: str, user_id: str = "default_user"):
+        """Keep SSE UX while streaming only the final user-facing answer."""
+        await MessageRepository.add_message(conversation_id, user_id, "user", user_message)
+        try:
+            context, data, tools_used, immediate = await self._prepare(user_message, conversation_id)
+            if immediate: full = immediate
+            elif data: full = await self._answer_from_data(user_message, data, context)
+            else: full = clean_model_answer(await self._ollama(self._general_prompt(user_message, context)))
+            full = full or "I couldn't generate a response right now."
+            for i in range(0, len(full), 80):
+                chunk = full[i:i + 80]
+                yield {"type": "content", "content": chunk, "token": chunk, "done": False}
+            await MessageRepository.add_message(conversation_id, user_id, "assistant", full)
+            yield {"type": "done", "content": "", "token": "", "done": True, "full_response": full, "tools_used": tools_used}
+        except Exception as exc:
+            logger.exception("Streaming agent request failed")
+            error_msg = "Sorry, I couldn't generate the response right now."
             await MessageRepository.add_message(conversation_id, user_id, "assistant", error_msg)
-            yield {
-                "type": "error",
-                "content": error_msg,
-                "token": error_msg,
-                "done": True,
-                "error": str(e)
-            }
+            yield {"type": "error", "content": error_msg, "token": error_msg, "done": True, "error": str(exc)}
 
 
-# Singleton instance
 ai_agent = AIAgent()
