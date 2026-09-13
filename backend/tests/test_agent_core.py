@@ -1,6 +1,8 @@
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from app.agent import AIAgent, clean_model_answer
+from app.services.entity_resolver import IndianEquityResolver
 
 
 class FinancialAgentCoreTests(unittest.TestCase):
@@ -12,39 +14,48 @@ class FinancialAgentCoreTests(unittest.TestCase):
         self.assertEqual(clean_model_answer(text), "TCS is ₹100.")
 
     def test_stock_alias_resolution(self):
-        self.assertEqual(self.agent._resolve_stock("What is TCS price?"), "TCS.NS")
-        self.assertEqual(self.agent._resolve_stock("Analyze Reliance Industries"), "RELIANCE.NS")
+        self.assertEqual(self.agent._classify("What is TCS price?"), "stock")
+        self.assertEqual(self.agent._classify("Analyze Reliance Industries"), "stock")
 
     def test_explicit_exchange_ticker_resolution(self):
-        self.assertEqual(self.agent._resolve_stock("price of INFY.NS"), "INFY.NS")
-        self.assertEqual(self.agent._resolve_stock("price of ABC.BO"), "ABC.BO")
+        resolved = self.agent._classify("price of INFY.NS")
+        self.assertEqual(resolved, "stock")
+
+    def test_generic_price_does_not_force_stock_routing(self):
+        self.assertEqual(self.agent._classify("What is the price?"), "general")
 
     def test_stock_data_validation_rejects_usd_for_indian_stock(self):
-        data = {
-            "success": True,
-            "ticker": "TCS.NS",
-            "current_price": 1000,
-            "currency": "USD",
-        }
+        data = {"success": True, "ticker": "TCS.NS", "current_price": 1000, "currency": "USD"}
         self.assertIsNone(self.agent._validate_stock(data, "TCS.NS"))
 
     def test_stock_data_validation_rejects_ticker_mismatch(self):
-        data = {
-            "success": True,
-            "ticker": "RELIANCE.NS",
-            "current_price": 1000,
-            "currency": "INR",
-        }
+        data = {"success": True, "ticker": "RELIANCE.NS", "current_price": 1000, "currency": "INR"}
         self.assertIsNone(self.agent._validate_stock(data, "TCS.NS"))
 
     def test_stock_data_validation_accepts_valid_indian_quote(self):
-        data = {
-            "success": True,
-            "ticker": "TCS.NS",
-            "current_price": 1000,
-            "currency": "INR",
-        }
+        data = {"success": True, "ticker": "TCS.NS", "current_price": 1000, "currency": "INR"}
         self.assertEqual(self.agent._validate_stock(data, "TCS.NS"), data)
+
+    def test_resolver_accepts_explicit_ticker_without_network(self):
+        async def run():
+            return await IndianEquityResolver.resolve("INFY.NS")
+        import asyncio
+        result = asyncio.run(run())
+        self.assertEqual(result["ticker"], "INFY.NS")
+
+    def test_resolver_uses_alias_without_network(self):
+        import asyncio
+        result = asyncio.run(IndianEquityResolver.resolve("Tata Consultancy Services"))
+        self.assertEqual(result["ticker"], "TCS.NS")
+
+    def test_resolver_does_not_guess_on_lookup_failure(self):
+        import asyncio
+        with patch("app.services.entity_resolver.httpx.AsyncClient") as client_cls:
+            client = client_cls.return_value.__aenter__.return_value
+            client.get = AsyncMock(side_effect=RuntimeError("network down"))
+            result = asyncio.run(IndianEquityResolver.resolve("Unknown Telecom Company"))
+        self.assertFalse(result["success"])
+        self.assertNotIn("ticker", result)
 
 
 if __name__ == "__main__":
