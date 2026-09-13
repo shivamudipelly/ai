@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     
     # Ollama settings
     ollama_host: str = "http://ai-engine:11434"
-    ollama_model: str = "llama3"
+    ollama_model: str = "qwen2.5:14b"  # Qwen 2.5 with reasoning capabilities
     
     # API settings
     api_prefix: str = "/api"
