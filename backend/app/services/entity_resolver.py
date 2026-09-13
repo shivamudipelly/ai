@@ -36,8 +36,8 @@ def _score(query: str, name: str, symbol: str) -> int:
     if q in n or q in s:
         return 80
     words = [w for w in q.split() if len(w) > 2 and w not in QUERY_NOISE]
-    if words and sum(w in n for w in words) == len(words):
-        return 60
+    if words and all(w in n for w in words):
+        return 90
     return 0
 
 
@@ -49,15 +49,12 @@ class IndianEquityResolver:
         cleaned = _clean(query)
         if not cleaned:
             return {"success": False, "error": "A company name or ticker is required."}
-
         explicit = re.search(r"\b([A-Za-z0-9&-]+\.(?:NS|BO))\b", query, re.I)
         if explicit:
             return {"success": True, "ticker": explicit.group(1).upper(), "source": "explicit_ticker"}
-
         for alias in sorted(ALIASES, key=len, reverse=True):
             if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", cleaned):
                 return {"success": True, "ticker": ALIASES[alias], "source": "verified_alias"}
-
         try:
             async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
                 response = await client.get(
@@ -69,7 +66,6 @@ class IndianEquityResolver:
                 quotes: List[Dict[str, Any]] = response.json().get("quotes", [])
         except Exception:
             return {"success": False, "error": "Company lookup is temporarily unavailable. Please provide the NSE/BSE ticker (for example, TCS.NS)."}
-
         candidates = []
         for quote in quotes:
             symbol = str(quote.get("symbol", "")).upper()
@@ -84,11 +80,11 @@ class IndianEquityResolver:
             score = _score(query, name, symbol)
             if score:
                 candidates.append({"ticker": symbol, "company_name": name, "score": score})
-
         candidates.sort(key=lambda x: x["score"], reverse=True)
         if not candidates:
             return {"success": False, "error": f"Could not verify an Indian listed company matching '{query}'."}
-        if candidates[0]["score"] < 80:
-            return {"success": False, "ambiguous": True, "error": f"I found possible matches for '{query}', but I cannot safely choose one.", "candidates": candidates[:5]}
         best = candidates[0]
+        equally_scored = [c for c in candidates if c["score"] == best["score"] and c["ticker"] != best["ticker"]]
+        if best["score"] < 80 or equally_scored:
+            return {"success": False, "ambiguous": True, "error": f"I found possible matches for '{query}', but I cannot safely choose one.", "candidates": candidates[:5]}
         return {"success": True, "ticker": best["ticker"], "company_name": best["company_name"], "source": "Yahoo Finance search"}
