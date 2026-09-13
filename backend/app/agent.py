@@ -12,7 +12,7 @@ from app.config import settings
 from app.tools import FINANCIAL_TOOLS
 from app.repositories import MessageRepository
 from app.models import Message
-from app.services.entity_resolver import IndianEquityResolver
+from app.services.entity_resolver import IndianEquityResolver, ALIASES
 
 logger = logging.getLogger(__name__)
 IST = ZoneInfo("Asia/Kolkata")
@@ -75,6 +75,7 @@ class AIAgent:
         if any(term in q for term in MF_TERMS): return "mutual_fund"
         if any(term in q for term in CRYPTO_TERMS): return "crypto"
         if re.search(r"\b[A-Z]{2,15}\.(?:NS|BO)\b", text, re.I): return "stock"
+        if any(re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", q) for alias in ALIASES): return "stock"
         if any(term in q for term in STOCK_TERMS): return "stock"
         return "general"
 
