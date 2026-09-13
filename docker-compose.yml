@@ -18,7 +18,7 @@ services:
       retries: 5
       start_period: 30s
 
-  # Ollama AI Engine - Runs local LLM (Llama 3 / Qwen 2.5)
+  # Ollama AI Engine - Runs local LLM (Qwen 2.5 with reasoning capabilities)
   ai-engine:
     image: ollama/ollama:latest
     container_name: financial-ai-ollama
@@ -44,7 +44,8 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 60s
+      start_period: 120s
+    command: "ollama serve"
 
   # FastAPI Backend - API routing, AI logic, data fetching
   backend:
@@ -59,7 +60,7 @@ services:
       - MONGODB_URL=mongodb://mongodb:27017
       - MONGODB_DB_NAME=financial_ai
       - OLLAMA_HOST=http://ai-engine:11434
-      - OLLAMA_MODEL=llama3
+      - OLLAMA_MODEL=qwen2.5:14b
     depends_on:
       mongodb:
         condition: service_healthy

@@ -37,10 +37,10 @@ cd /workspace
 docker-compose up --build
 ```
 
-**Note:** First-time startup will take 5-10 minutes as it:
+**Note:** First-time startup will take 10-15 minutes as it:
 - Downloads MongoDB image (~500MB)
 - Downloads Ollama image (~200MB)
-- Downloads Llama 3 model (~4GB)
+- Downloads Qwen 2.5 14B model (~9GB) - **Reasoning-capable LLM**
 - Builds frontend and backend images
 
 ### Step 3: Access the services
@@ -173,16 +173,29 @@ Once Phase 1 is running successfully, we'll proceed to:
 
 ## ⚠️ Important Notes
 
-1. **First Run**: The Ollama container will automatically pull the Llama 3 model on first run. This can take 10-20 minutes depending on your internet speed.
+1. **First Run**: The Ollama container will automatically pull the **Qwen 2.5 14B** model on first run. This can take 15-25 minutes depending on your internet speed. This model has superior reasoning capabilities compared to Llama 3, making it ideal for financial analysis.
 
-2. **GPU Acceleration**: If you have an NVIDIA GPU, uncomment the GPU section in `docker-compose.yml` under the `ai-engine` service for faster inference.
+2. **Why Qwen 2.5?** 
+   - **Enhanced Reasoning**: Better at logical deduction and multi-step problem solving
+   - **Financial Domain Knowledge**: Trained on extensive financial and technical data
+   - **Function Calling**: Superior at understanding when to call external tools (yfinance, CoinGecko)
+   - **14B Parameters**: Sweet spot between performance and resource usage (~9GB RAM)
 
-3. **Resource Usage**: 
-   - Ollama with Llama 3 requires ~8GB RAM
-   - Total system memory usage: ~10-12GB
-   - Ensure you have at least 16GB RAM for smooth operation
+3. **GPU Acceleration**: If you have an NVIDIA GPU, uncomment the GPU section in `docker-compose.yml` under the `ai-engine` service for significantly faster inference (5-10x speedup).
 
-4. **Stopping Services**: Use `docker-compose down` to stop all containers gracefully.
+4. **Resource Usage**: 
+   - Ollama with Qwen 2.5 14B requires ~9-10GB RAM
+   - Total system memory usage: ~12-14GB
+   - Ensure you have at least 16GB RAM for smooth operation (32GB recommended)
+
+5. **Alternative Models**: If Qwen 2.5 14B is too large for your system, you can change to:
+   - `qwen2.5:7b` (5GB RAM) - Good balance
+   - `qwen2.5:3b` (2GB RAM) - Lightweight option
+   - `llama3.1:8b` (5GB RAM) - Meta's latest
+   
+   Simply update `OLLAMA_MODEL` in `docker-compose.yml` and `config.py`.
+
+6. **Stopping Services**: Use `docker-compose down` to stop all containers gracefully. The model will remain cached in the `ollama_data` volume for faster subsequent startups.
 
 ---
 
