@@ -10,8 +10,13 @@ class TestIndianEquityResolver(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["ticker"], "TCS.NS")
 
+    async def test_alias_inside_natural_language_question(self):
+        result = await IndianEquityResolver.resolve("What is TCS price today?")
+        self.assertTrue(result["success"])
+        self.assertEqual(result["ticker"], "TCS.NS")
+
     async def test_explicit_ticker(self):
-        result = await IndianEquityResolver.resolve("INFY.NS")
+        result = await IndianEquityResolver.resolve("price of INFY.NS")
         self.assertTrue(result["success"])
         self.assertEqual(result["ticker"], "INFY.NS")
 
