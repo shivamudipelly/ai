@@ -17,6 +17,13 @@ ALIASES = {
     "adani enterprises": "ADANIENT.NS", "adani ports": "ADANIPORTS.NS",
 }
 
+# Words commonly used around a company name but not part of its identity.
+QUERY_NOISE = {
+    "what", "whats", "is", "the", "price", "share", "stock", "of", "for",
+    "today", "now", "current", "latest", "value", "quote", "analyze", "analyse",
+    "analysis", "buy", "sell", "should", "can", "you", "me", "tell", "about",
+}
+
 
 def _clean(value: str) -> str:
     value = re.sub(r"\s+", " ", value or "").strip().lower()
@@ -29,8 +36,10 @@ def _score(query: str, name: str, symbol: str) -> int:
         return 100
     if q in n or q in s:
         return 80
-    words = [w for w in q.split() if len(w) > 2]
-    return 60 if words and sum(w in n for w in words) == len(words) else 0
+    words = [w for w in q.split() if len(w) > 2 and w not in QUERY_NOISE]
+    if words and sum(w in n for w in words) == len(words):
+        return 60
+    return 0
 
 
 class IndianEquityResolver:
@@ -42,10 +51,15 @@ class IndianEquityResolver:
         if not cleaned:
             return {"success": False, "error": "A company name or ticker is required."}
 
-        if re.fullmatch(r"[A-Za-z0-9-]+\.(?:NS|BO)", query.strip(), re.I):
-            return {"success": True, "ticker": query.strip().upper(), "source": "explicit_ticker"}
-        if cleaned in ALIASES:
-            return {"success": True, "ticker": ALIASES[cleaned], "source": "verified_alias"}
+        explicit = re.search(r"\b([A-Za-z0-9&-]+\.(?:NS|BO))\b", query, re.I)
+        if explicit:
+            return {"success": True, "ticker": explicit.group(1).upper(), "source": "explicit_ticker"}
+
+        # Resolve known aliases even when they appear inside a natural-language question.
+        # Prefer the longest alias so "hdfc bank" wins over a shorter token.
+        for alias in sorted(ALIASES, key=len, reverse=True):
+            if re.search(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", cleaned):
+                return {"success": True, "ticker": ALIASES[alias], "source": "verified_alias"}
 
         try:
             async with httpx.AsyncClient(timeout=8.0, follow_redirects=True) as client:
@@ -78,6 +92,16 @@ class IndianEquityResolver:
         if not candidates:
             return {"success": False, "error": f"Could not verify an Indian listed company matching '{query}'."}
         if candidates[0]["score"] < 80:
-            return {"success": False, "ambiguous": True, "error": f"I found possible matches for '{query}', but I cannot safely choose one.", "candidates": candidates[:5]}
+            return {
+                "success": False,
+                "ambiguous": True,
+                "error": f"I found possible matches for '{query}', but I cannot safely choose one.",
+                "candidates": candidates[:5],
+            }
         best = candidates[0]
-        return {"success": True, "ticker": best["ticker"], "company_name": best["company_name"], "source": "Yahoo Finance search"}
+        return {
+            "success": True,
+            "ticker": best["ticker"],
+            "company_name": best["company_name"],
+            "source": "Yahoo Finance search",
+        }
