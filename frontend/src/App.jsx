@@ -35,13 +35,34 @@ function App() {
   // Load conversations list
   const loadConversations = async () => {
     try {
-      const response = await fetch('/api/chat/conversations')
-      if (response.ok) {
-        const data = await response.json()
-        setConversations(data.conversations || [])
-        if (data.conversations && data.conversations.length > 0 && !currentConversationId) {
-          setCurrentConversationId(data.conversations[0].id)
-          loadMessages(data.conversations[0].id)
+      // Get or create default user
+      let userId = localStorage.getItem('userId')
+      if (!userId) {
+        // Create a new user
+        const userResponse = await fetch('/api/chat/users', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            email: `user-${Date.now()}@example.com`,
+            name: 'User'
+          })
+        })
+        if (userResponse.ok) {
+          const userData = await userResponse.json()
+          userId = userData.id
+          localStorage.setItem('userId', userId)
+        }
+      }
+      
+      if (userId) {
+        const response = await fetch(`/api/chat/users/${userId}/conversations`)
+        if (response.ok) {
+          const data = await response.json()
+          setConversations(data || [])
+          if (data && data.length > 0 && !currentConversationId) {
+            setCurrentConversationId(data[0].id)
+            loadMessages(data[0].id)
+          }
         }
       }
     } catch (err) {
@@ -65,14 +86,23 @@ function App() {
   // Create new conversation
   const createNewConversation = async () => {
     try {
-      const response = await fetch('/api/chat/conversation', {
+      const userId = localStorage.getItem('userId')
+      if (!userId) {
+        setError('No user found. Please refresh the page.')
+        return
+      }
+      
+      const response = await fetch('/api/chat/conversations', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: 'New Conversation' })
+        body: JSON.stringify({ 
+          user_id: userId,
+          title: 'New Conversation' 
+        })
       })
       if (response.ok) {
         const data = await response.json()
-        setCurrentConversationId(data.conversation.id)
+        setCurrentConversationId(data.id)
         setMessages([])
         loadConversations()
       }
@@ -84,6 +114,39 @@ function App() {
   // Send message with streaming
   const sendMessage = async () => {
     if (!inputMessage.trim() || isLoading) return
+    
+    // Create conversation if none exists
+    let convId = currentConversationId
+    if (!convId) {
+      const userId = localStorage.getItem('userId')
+      if (!userId) {
+        setError('No user found. Please refresh the page.')
+        return
+      }
+      
+      try {
+        const response = await fetch('/api/chat/conversations', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ 
+            user_id: userId,
+            title: inputMessage.substring(0, 50) + (inputMessage.length > 50 ? '...' : '')
+          })
+        })
+        if (response.ok) {
+          const data = await response.json()
+          convId = data.id
+          setCurrentConversationId(convId)
+          loadConversations()
+        } else {
+          setError('Failed to create conversation')
+          return
+        }
+      } catch (err) {
+        setError('Failed to create conversation')
+        return
+      }
+    }
 
     const userMessage = {
       role: 'user',
@@ -116,7 +179,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: userMessage.content,
-          conversation_id: currentConversationId,
+          conversation_id: convId,
           simple_mode: simpleMode
         })
       })
